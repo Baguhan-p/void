@@ -25,6 +25,7 @@ export interface Snapshot {
   journal: JournalEntry[];
   toasts: Toast[];
   hasSave: boolean;
+  lockless: boolean;
   settings: { volume: number; sens: number; subtitles: boolean };
   eventFlash: number;
   mapFlags: MapFlags;
@@ -118,6 +119,9 @@ export class Game {
 
   private holdTarget: Interactable | null = null; private holdProgress = 0;
   private promptNow = ""; private altNow = "";
+  // фолбэк управления, если браузер/iframe не даёт pointer lock
+  lockless = false; private lookDrag = false; private lastMX = 0; private lastMY = 0;
+  private lockWarned = false;
   private interactables: Interactable[] = [];
   private clock = new THREE.Clock();
   private raf = 0; private disposed = false;
@@ -189,7 +193,11 @@ export class Game {
     document.addEventListener("wheel", this.onWheel, { passive: false });
     document.addEventListener("keydown", this.onKeyDown);
     document.addEventListener("keyup", this.onKeyUp);
+    document.addEventListener("contextmenu", this.onCtx);
   }
+  private onCtx = (e: MouseEvent) => {
+    if (this.screen === "playing") e.preventDefault();
+  };
 
   dispose() {
     this.disposed = true;
@@ -201,6 +209,7 @@ export class Game {
     document.removeEventListener("wheel", this.onWheel);
     document.removeEventListener("keydown", this.onKeyDown);
     document.removeEventListener("keyup", this.onKeyUp);
+    document.removeEventListener("contextmenu", this.onCtx);
     window.removeEventListener("resize", this.resize);
     this.renderer.dispose();
   }
@@ -213,16 +222,30 @@ export class Game {
   };
 
   private onLockChange = () => {
+    const was = this.locked;
     this.locked = document.pointerLockElement === this.renderer.domElement;
-    if (!this.locked && this.screen === "playing" && !this.notebookOpen) this.pause();
+    if (this.locked) this.lookDrag = false;
+    // авто-пауза только если захват был и сорвался (Esc); в фолбэк-режиме пауза — по клавише Esc
+    if (!this.locked && was && this.screen === "playing" && !this.notebookOpen) this.pause();
   };
   private onMouse = (e: MouseEvent) => {
-    if (!this.locked || this.screen !== "playing") return;
-    this.yaw -= e.movementX * 0.0021 * this.settings.sens;
-    this.pitch = clamp(this.pitch - e.movementY * 0.0021 * this.settings.sens, -1.45, 1.45);
+    if (this.screen !== "playing" || this.notebookOpen) return;
+    if (!this.locked && !(this.lockless && this.lookDrag)) return;
+    const dx = this.locked ? e.movementX : e.clientX - this.lastMX;
+    const dy = this.locked ? e.movementY : e.clientY - this.lastMY;
+    this.lastMX = e.clientX; this.lastMY = e.clientY;
+    this.yaw -= dx * 0.0021 * this.settings.sens;
+    this.pitch = clamp(this.pitch - dy * 0.0021 * this.settings.sens, -1.45, 1.45);
   };
   private onMouseDown = (e: MouseEvent) => {
-    if (!this.locked || this.screen !== "playing") return;
+    if (!(this.locked || this.lockless) || this.screen !== "playing" || this.notebookOpen) return;
+    if (e.button === 2) {
+      if (this.lockless && !this.locked) {
+        this.lookDrag = true; this.lastMX = e.clientX; this.lastMY = e.clientY;
+        e.preventDefault();
+      }
+      return;
+    }
     if (e.button !== 0) return;
     const keyNear = this.nearKey();
     if (keyNear && this.txTarget && this.powerOn()) {
@@ -232,6 +255,7 @@ export class Game {
     }
   };
   private onMouseUp = (e: MouseEvent) => {
+    if (e.button === 2) { this.lookDrag = false; return; }
     if (e.button !== 0 || !this.txPressing) return;
     this.txPressing = false;
     this.world.keyLever.rotation.z = 0;
@@ -243,7 +267,7 @@ export class Game {
     this.pushTx(el);
   };
   private onWheel = (e: WheelEvent) => {
-    if (!this.locked || this.screen !== "playing") return;
+    if (!(this.locked || this.lockless) || this.screen !== "playing") return;
     if (this.distTo(new THREE.Vector3(-1.6, this.floorEye(), -3.2)) < 3.4) {
       e.preventDefault();
       const nf = clamp(this.freq + (e.deltaY > 0 ? -5 : 5), 500, 1600);
@@ -259,6 +283,13 @@ export class Game {
 
     if (e.code === "KeyN" && (this.screen === "playing" || this.notebookOpen)) {
       this.toggleNotebook(); return;
+    }
+    if (e.code === "Escape") {
+      if (this.notebookOpen) { this.closeNotebook(); return; }
+      // в фолбэк-режиме (без pointer lock) Esc сам вызывает паузу;
+      // при захвате курсора Esc снимает захват → пауза придёт из onLockChange
+      if (this.screen === "playing" && this.lockless && !this.locked) this.pause();
+      return;
     }
     if (this.notebookOpen || this.screen !== "playing") return;
 
@@ -350,10 +381,34 @@ export class Game {
   //  СЛУЖЕБНОЕ
   // ============================================================
   private lock() {
+    if (this.locked) return;
+    let settled = false;
     try {
       const p = this.renderer.domElement.requestPointerLock() as unknown as Promise<void> | undefined;
-      if (p && typeof p.catch === "function") p.catch(() => { this.pause(); });
-    } catch { this.pause(); }
+      if (p && typeof p.then === "function") {
+        settled = true;
+        p.then(() => { /* захват получен — onLockChange подхватит */ })
+          .catch(() => this.fallbackLook());
+      }
+    } catch {
+      this.fallbackLook();
+      return;
+    }
+    // браузер без промиса (старый Safari) — проверяем фактом через ~1с
+    if (!settled) {
+      window.setTimeout(() => {
+        if (!this.locked) this.fallbackLook();
+      }, 1000);
+    }
+  }
+  private fallbackLook() {
+    if (this.locked) return;
+    this.lockless = true;
+    if (!this.lockWarned && (this.screen === "playing" || this.screen === "paused")) {
+      this.lockWarned = true;
+      this.toast("Захват курсора запрещён средой: обзор — зажать правую кнопку мыши", "[помехи]");
+    }
+    this.emit();
   }
   private beginPlay() {
     this.audio.init();
@@ -389,6 +444,7 @@ export class Game {
       flashOn: this.flashOn, held, firewood: this.firewood,
       notebookOpen: this.notebookOpen, notebookTab: this.notebookTab,
       journal: this.journal, toasts: this.toasts.slice(-4), hasSave: this.hasSave,
+      lockless: this.lockless && !this.locked,
       settings: { ...this.settings }, eventFlash: this.eventFlash,
       mapFlags: this.mapFlags(),
       stats: {

@@ -9,7 +9,7 @@ const INITIAL: Snapshot = {
   prompt: "", altPrompt: "", holdProgress: null, objective: "",
   paranoia: 0, battery: 100, flashOn: false, held: [], firewood: 0,
   notebookOpen: false, notebookTab: "journal", journal: [], toasts: [],
-  hasSave: false, settings: { volume: 0.8, sens: 1.0, subtitles: true },
+  hasSave: false, lockless: false, settings: { volume: 0.8, sens: 1.0, subtitles: true },
   eventFlash: 0,
   mapFlags: { coordsKnown: false, caveOpen: false, serversLooted: [false, false], dug: false },
   stats: { decoded: 0, transmitted: 0, cassettes: 0 },
@@ -151,7 +151,11 @@ function Hud({ snap }: { snap: Snapshot }) {
             </>
           )}
         </div>
-        <div className="mt-1 text-[10px] tracking-widest text-[#e6d9b8]/35">[N] БЛОКНОТ · [F] ФОНАРЬ · [ESC] ПАУЗА</div>
+        <div className="mt-1 text-[10px] tracking-widest text-[#e6d9b8]/35">
+          {snap.lockless
+            ? <span className="text-[#f2a33c]/70">ОБЗОР — ЗАЖАТЬ ПРАВУЮ КНОПКУ МЫШИ · [ESC] ПАУЗА</span>
+            : "[N] БЛОКНОТ · [F] ФОНАРЬ · [ESC] ПАУЗА"}
+        </div>
       </div>
     </div>
   );
